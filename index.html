@@ -190,6 +190,20 @@
     color: var(--muted);
   }
   .rules b { font-family: var(--font-display); font-weight: 400; font-size: 15px; color: var(--ink); margin-right: 4px; }
+  .specials { flex-direction: column; align-items: center; gap: 4px; }
+  .ico { display: inline-block; width: 15px; height: 15px; margin-right: 5px; vertical-align: -2px; border-radius: 50%; }
+  .ico-rainbow {
+    background: conic-gradient(#F0505A 0 60deg, #FF8F2E 0 120deg, #FFCB2E 0 180deg, #2FC285 0 240deg, #3D86F5 0 300deg, #A45CEB 0);
+    box-shadow: inset 0 0 0 1.5px rgba(42, 30, 92, 0.6);
+  }
+  .ico-cross {
+    border-radius: 4px;
+    background:
+      linear-gradient(#FFD54A, #FFD54A) center / 3px 9px no-repeat,
+      linear-gradient(#FFD54A, #FFD54A) center / 9px 3px no-repeat,
+      #3A2A80;
+    box-shadow: inset 0 0 0 1.5px #FFD54A;
+  }
   .how { margin: 0; max-width: 46ch; font-size: 12px; line-height: 1.6; color: var(--muted); text-align: center; }
 
   @media (pointer: coarse) { .kb { display: none; } }
@@ -239,6 +253,10 @@
     <li><b>5 连</b>100 分</li>
     <li><b>连锁</b>第 n 波得分 ×n</li>
   </ul>
+  <ul class="rules specials" aria-label="特殊方块">
+    <li><i class="ico ico-rainbow" aria-hidden="true"></i><b>彩虹球</b>当万能块配 2 个同色消掉，全屏这种颜色全消</li>
+    <li><i class="ico ico-cross" aria-hidden="true"></i><b>十字炸弹</b>当万能块配 2 个同色消掉，所在整行整列全消</li>
+  </ul>
   <p class="how">按住糖果朝相邻方向滑一下，或先后点两颗相邻的糖果来交换；横竖连成 3 颗同色即消除，上方糖果落下后再成行就是连锁。<span class="kb">键盘：方向键移动，空格选择，H 提示。</span></p>
 </main>
 
@@ -264,6 +282,17 @@
     { img: 'images/6.png', base: '#A45CEB', light: '#DAB7FF', dark: '#5B1E9B', shape: 'triangle' },
   ];
 
+  // 两种特殊方块（低概率出现，代码绘制）：都是“万能块”，和任意 2 个同色方块连成一排就能消。
+  //   彩虹球：消掉时，全屏和它一起消的那种颜色全部消掉
+  //   十字炸弹：消掉时，以它为中心的整行和整列全部消掉
+  // 被别的特殊方块波及到的特殊方块也会接着触发。
+  const RAINBOW = KINDS, CROSS = KINDS + 1;
+  const isSpecial = k => k >= KINDS;
+  const SPECIAL_DROP = 0.05;      // 消除后从上方落下的每个新方块，有 5% 是特殊方块
+  const SPECIAL_ON_CLEAR = 0.05;  // 每次消除，有 5% 在被消掉的位置上随机冒出一个特殊方块
+  const randSpecial = () => (Math.random() < 0.5 ? RAINBOW : CROSS);
+  const SPECIAL_NAMES = { [RAINBOW]: '彩虹球', [CROSS]: '十字炸弹' };
+
   const $ = id => document.getElementById(id);
   const canvas = $('board');
   const ctx = canvas.getContext('2d');
@@ -284,7 +313,7 @@
   let score = 0, shown = 0, moves = 0, maxChain = 0;
   let best = parseInt(store.get('xxl6-best', '0'), 10) || 0;
   let muted = store.get('xxl6-muted', '0') === '1';
-  const tweens = [], parts = [], popups = [];
+  const tweens = [], parts = [], popups = [], beams = [], zaps = [];
   let fallers = [], fallDone = null;
 
   const ease = {
@@ -322,8 +351,9 @@
   }
   // 手机震动反馈（安卓支持，iPhone 的浏览器不支持会自动忽略）；跟音效开关一起关
   function vibe(pattern) {
-    if (muted) return;
-    try { if (navigator.vibrate) navigator.vibrate(pattern); } catch { /* 不支持就算了 */ }
+    if (muted || !navigator.vibrate) return;
+    if (navigator.userActivation && !navigator.userActivation.hasBeenActive) return;   // 还没碰过页面时浏览器会拒绝并报错
+    try { navigator.vibrate(pattern); } catch { /* 不支持就算了 */ }
   }
   const STEPS = [0, 2, 4, 7, 9, 12, 14, 16, 19, 21, 24]; // 五声音阶，连锁越多音越高
   const sfx = {
@@ -336,6 +366,15 @@
       vibe(chain >= 2 ? 25 : 12);
     },
     shuffle() { tone(300, 0, 0.28, 'sine', 0.05, 900); },
+    boom() {
+      tone(150, 0, 0.4, 'sawtooth', 0.07, 50);
+      tone(900, 0.02, 0.35, 'triangle', 0.09, 1800);
+      vibe([30, 30, 50]);
+    },
+    sparkle() {
+      tone(1320, 0, 0.12, 'sine', 0.07, 1760);
+      tone(1760, 0.08, 0.16, 'sine', 0.06, 2640);
+    },
   };
 
   /* ---------- 绘制工具 ---------- */
@@ -455,6 +494,119 @@
       g.restore();
       return c;
     });
+    sprites.push(specialSprite(S, RAINBOW), specialSprite(S, CROSS));
+  }
+
+  function starPath(g, points, outer, inner) {
+    g.beginPath();
+    for (let i = 0; i < points * 2; i++) {
+      const a = -Math.PI / 2 + i * Math.PI / points, d = i % 2 ? inner : outer;
+      if (i) g.lineTo(Math.cos(a) * d, Math.sin(a) * d); else g.moveTo(Math.cos(a) * d, Math.sin(a) * d);
+    }
+    g.closePath();
+  }
+
+  // 彩虹球：六色转盘 + 白色四角星；十字炸弹：深紫底金边 + 四向金箭头
+  function specialSprite(S, kind) {
+    const c = document.createElement('canvas');
+    c.width = c.height = S;
+    const g = c.getContext('2d');
+    const r = S * 0.4;
+    g.translate(S / 2, S / 2);
+    g.lineJoin = 'round';
+
+    const glow = g.createRadialGradient(0, 0, r * 0.6, 0, 0, S * 0.5);
+    glow.addColorStop(0, kind === RAINBOW ? 'rgba(255, 255, 255, 0.55)' : 'rgba(255, 213, 74, 0.6)');
+    glow.addColorStop(1, 'rgba(255, 255, 255, 0)');
+    g.fillStyle = glow;
+    g.fillRect(-S / 2, -S / 2, S, S);
+
+    if (kind === RAINBOW) {
+      g.beginPath();
+      g.arc(0, S * 0.05, r * 0.95, 0, Math.PI * 2);
+      g.fillStyle = 'rgba(10, 4, 24, 0.38)';
+      g.fill();
+      for (let i = 0; i < KINDS; i++) {
+        const a0 = -Math.PI / 2 + i * 2 * Math.PI / KINDS, a1 = a0 + 2 * Math.PI / KINDS;
+        g.beginPath();
+        g.moveTo(0, 0);
+        g.arc(0, 0, r * 0.95, a0, a1 + 0.01);
+        g.closePath();
+        g.fillStyle = TYPES[i].base;
+        g.fill();
+      }
+      const shine = g.createRadialGradient(0, 0, 0, 0, 0, r * 0.95);
+      shine.addColorStop(0, 'rgba(255, 255, 255, 0.95)');
+      shine.addColorStop(0.35, 'rgba(255, 255, 255, 0.35)');
+      shine.addColorStop(1, 'rgba(255, 255, 255, 0)');
+      g.beginPath();
+      g.arc(0, 0, r * 0.95, 0, Math.PI * 2);
+      g.fillStyle = shine;
+      g.fill();
+      g.lineWidth = S * 0.045;
+      g.strokeStyle = '#2A1E5C';
+      g.stroke();
+      starPath(g, 4, r * 0.5, r * 0.15);
+      g.fillStyle = '#FFFFFF';
+      g.fill();
+      g.lineWidth = S * 0.025;
+      g.stroke();
+    } else {
+      const box = () => rr(g, -r * 0.88, -r * 0.88, r * 1.76, r * 1.76, r * 0.36);
+      g.save();
+      g.translate(0, S * 0.05);
+      box();
+      g.fillStyle = 'rgba(10, 4, 24, 0.4)';
+      g.fill();
+      g.restore();
+      box();
+      const bg = g.createLinearGradient(0, -r, 0, r);
+      bg.addColorStop(0, '#5B45B0');
+      bg.addColorStop(1, '#22164F');
+      g.fillStyle = bg;
+      g.fill();
+      g.lineWidth = S * 0.05;
+      g.strokeStyle = '#FFD54A';
+      g.stroke();
+
+      const L = r * 0.8, w = r * 0.26, head = r * 0.36;
+      const arm = () => {
+        g.beginPath();
+        g.moveTo(-w / 2, 0);
+        g.lineTo(-w / 2, -(L - head));
+        g.lineTo(-head * 0.85, -(L - head));
+        g.lineTo(0, -L);
+        g.lineTo(head * 0.85, -(L - head));
+        g.lineTo(w / 2, -(L - head));
+        g.lineTo(w / 2, 0);
+        g.closePath();
+      };
+      // 先描四条臂的深色边，再整体填金色，交叉处就不会有描边线
+      for (let i = 0; i < 4; i++) {
+        g.save(); g.rotate(i * Math.PI / 2); arm();
+        g.lineWidth = S * 0.06; g.strokeStyle = '#1A1040'; g.stroke();
+        g.restore();
+      }
+      for (let i = 0; i < 4; i++) {
+        g.save(); g.rotate(i * Math.PI / 2); arm();
+        g.fillStyle = '#FFD54A'; g.fill();
+        g.restore();
+      }
+      g.beginPath();
+      g.arc(0, 0, r * 0.2, 0, Math.PI * 2);
+      g.fillStyle = '#FFFFFF';
+      g.fill();
+
+      g.save();
+      box();
+      g.clip();
+      g.fillStyle = 'rgba(255, 255, 255, 0.16)';
+      g.beginPath();
+      g.ellipse(-r * 0.3, -r * 0.6, r * 0.65, r * 0.26, -0.3, 0, Math.PI * 2);
+      g.fill();
+      g.restore();
+    }
+    return c;
   }
 
   function readTheme() {
@@ -511,50 +663,114 @@
     return { color, x: c, y: r, ty: r, vy: 0, delay: 0, scale: 1, alpha: 1, land: -1 };
   }
 
-  function runLen(cm, r, c, dr, dc) {
-    const k = cm[r][c];
-    let n = 0, rr2 = r + dr, cc = c + dc;
-    while (inside(rr2, cc) && cm[rr2][cc] === k) { n++; rr2 += dr; cc += dc; }
-    return n;
-  }
-  function matchAt(cm, r, c) {
-    if (cm[r][c] < 0) return false;
-    return 1 + runLen(cm, r, c, 0, 1) + runLen(cm, r, c, 0, -1) >= 3
-        || 1 + runLen(cm, r, c, 1, 0) + runLen(cm, r, c, -1, 0) >= 3;
+  // 扫一条线（一行或一列），找出所有能消的段：长度 ≥3，段里的普通方块同色且至少 2 个，
+  // 特殊方块可以顶替任意颜色。返回 [起点, 终点(不含), 颜色]。
+  function scanLine(get) {
+    const runs = [];
+    let lastEnd = 0;
+    for (let i = 0; i < N; i++) {
+      let color = -1, normals = 0, j = i;
+      for (; j < N; j++) {
+        const k = get(j);
+        if (k < 0) break;
+        if (isSpecial(k)) continue;
+        if (color < 0) color = k;
+        else if (k !== color) break;
+        normals++;
+      }
+      if (j - i >= 3 && normals >= 2 && j > lastEnd) { runs.push([i, j, color]); lastEnd = j; }
+    }
+    return runs;
   }
 
-  // 找出所有横/竖 ≥3 的同色段
+  function matchAt(cm, r, c) {
+    if (cm[r][c] < 0) return false;
+    return scanLine(i => cm[r][i]).some(([s, e]) => s <= c && c < e)
+        || scanLine(i => cm[i][c]).some(([s, e]) => s <= r && r < e);
+  }
+
+  // 找出所有横/竖能消的段；runs 里记下每段的格子和颜色（彩虹球要用这个颜色）
   function findMatches(cm) {
     const marked = new Set(), runs = [];
+    const add = cells => cells.forEach(i => marked.add(i));
     for (let r = 0; r < N; r++) {
-      let c = 0;
-      while (c < N) {
-        const k = cm[r][c];
-        let e = c + 1;
-        while (k >= 0 && e < N && cm[r][e] === k) e++;
-        if (k >= 0 && e - c >= 3) {
-          const run = [];
-          for (let x = c; x < e; x++) { marked.add(r * N + x); run.push(r * N + x); }
-          runs.push(run);
-        }
-        c = e;
+      for (const [s, e, color] of scanLine(i => cm[r][i])) {
+        const cells = [];
+        for (let x = s; x < e; x++) cells.push(r * N + x);
+        runs.push({ cells, color });
+        add(cells);
       }
     }
     for (let c = 0; c < N; c++) {
-      let r = 0;
-      while (r < N) {
-        const k = cm[r][c];
-        let e = r + 1;
-        while (k >= 0 && e < N && cm[e][c] === k) e++;
-        if (k >= 0 && e - r >= 3) {
-          const run = [];
-          for (let y = r; y < e; y++) { marked.add(y * N + c); run.push(y * N + c); }
-          runs.push(run);
-        }
-        r = e;
+      for (const [s, e, color] of scanLine(i => cm[i][c])) {
+        const cells = [];
+        for (let y = s; y < e; y++) cells.push(y * N + c);
+        runs.push({ cells, color });
+        add(cells);
       }
     }
     return { marked, runs };
+  }
+
+  // 场上（不算 exclude 里的格子）数量最多的普通颜色；没有就返回 -1
+  function mostCommonColor(cm, exclude) {
+    const count = new Array(KINDS).fill(0);
+    for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+      const k = cm[r][c];
+      if (k >= 0 && !isSpecial(k) && !exclude.has(r * N + c)) count[k]++;
+    }
+    let best = -1;
+    for (let k = 0; k < KINDS; k++) if (count[k] > 0 && (best < 0 || count[k] > count[best])) best = k;
+    return best;
+  }
+
+  // 把这一波要消的格子算全：特殊方块被消掉时连带更多格子，被波及的特殊方块也会接着触发。
+  // delay 是每格开始消失的延迟（秒），让爆炸从中心往外扩散。
+  function expandClear(m, cm) {
+    const clear = new Set(m.marked), delay = new Map(), effects = [];
+    const kAt = i => cm[(i / N) | 0][i % N];
+    const rainbowColors = new Map();
+    for (const run of m.runs) {
+      for (const i of run.cells) {
+        if (kAt(i) !== RAINBOW) continue;
+        if (!rainbowColors.has(i)) rainbowColors.set(i, new Set());
+        rainbowColors.get(i).add(run.color);
+      }
+    }
+    const queue = [...clear].filter(i => isSpecial(kAt(i)));
+    const fired = new Set();
+    const add = (i, d) => {
+      if (clear.has(i)) return;
+      clear.add(i);
+      delay.set(i, d);
+      if (isSpecial(kAt(i))) queue.push(i);
+    };
+    while (queue.length) {
+      const i = queue.shift();
+      if (fired.has(i)) continue;
+      fired.add(i);
+      const r = (i / N) | 0, c = i % N, d0 = delay.get(i) || 0;
+      if (kAt(i) === CROSS) {
+        effects.push({ kind: CROSS, r, c, d: d0 });
+        for (let x = 0; x < N; x++) add(r * N + x, d0 + Math.abs(x - c) * 0.035);
+        for (let y = 0; y < N; y++) add(y * N + c, d0 + Math.abs(y - r) * 0.035);
+      } else {
+        // 被炸到的彩虹球没有“一起消的颜色”，就消场上最多的那种颜色
+        let colors = rainbowColors.get(i);
+        if (!colors || !colors.size) {
+          const mc = mostCommonColor(cm, clear);
+          colors = new Set(mc >= 0 ? [mc] : []);
+        }
+        const targets = [];
+        for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+          if (!colors.has(cm[y][x])) continue;
+          targets.push([y, x]);
+          add(y * N + x, d0 + 0.06 + Math.hypot(x - c, y - r) * 0.02);
+        }
+        effects.push({ kind: RAINBOW, r, c, d: d0, targets });
+      }
+    }
+    return { clear, delay, effects };
   }
 
   // 找可行的交换；all=false 时找到一个就返回
@@ -615,7 +831,7 @@
   function validColors(cm) {
     return Array.isArray(cm) && cm.length === N &&
       cm.every(row => Array.isArray(row) && row.length === N &&
-        row.every(k => Number.isInteger(k) && k >= 0 && k < KINDS));
+        row.every(k => Number.isInteger(k) && k >= 0 && k < KINDS + 2));
   }
 
   /* ---------- 动画：补间 + 重力下落 + 粒子 ---------- */
@@ -651,7 +867,9 @@
 
   function burst(t) {
     if (REDUCED) return;
-    const ty = TYPES[t.color];
+    const pal = t.color === RAINBOW ? TYPES.map(ty => ty.base)
+      : t.color === CROSS ? ['#FFD54A', '#FFFFFF']
+      : [TYPES[t.color].light, TYPES[t.color].base];
     for (let i = 0; i < 7; i++) {
       const a = Math.random() * Math.PI * 2, sp = 2.5 + Math.random() * 5;
       parts.push({
@@ -660,7 +878,7 @@
         life: 0, max: 0.45 + Math.random() * 0.35,
         size: 0.09 + Math.random() * 0.09,
         rot: Math.random() * 6, vr: (Math.random() - 0.5) * 16,
-        color: i % 2 ? ty.base : ty.light,
+        color: pal[i % pal.length],
       });
     }
   }
@@ -671,9 +889,11 @@
       if (p.life >= p.max) { parts.splice(i, 1); continue; }
       p.vy += 22 * dt; p.x += p.vx * dt; p.y += p.vy * dt; p.rot += p.vr * dt;
     }
-    for (let i = popups.length - 1; i >= 0; i--) {
-      popups[i].life += dt;
-      if (popups[i].life >= popups[i].max) popups.splice(i, 1);
+    for (const list of [popups, beams, zaps]) {
+      for (let i = list.length - 1; i >= 0; i--) {
+        list[i].life += dt;
+        if (list[i].life >= list[i].max) list.splice(i, 1);
+      }
     }
     for (const row of grid) for (const t of row) {
       if (t && t.land >= 0) { t.land += dt; if (t.land > 0.5) t.land = -1; }
@@ -699,11 +919,63 @@
         cy += (hint.b.r - hint.a.r) * amp;
       }
     }
+    if (isSpecial(t.color)) s *= 1 + 0.05 * Math.sin(now / 180 + t.x + t.y);   // 特殊方块一呼一吸，好认
     const sq = t.land >= 0 ? 0.13 * Math.exp(-t.land * 9) * Math.cos(t.land * 26) : 0;
     const w = cell * s * (1 + sq), h = cell * s * (1 - sq);
+    const dy = (cell * s - h) / 2;
     ctx.globalAlpha = Math.max(0, t.alpha);
-    ctx.drawImage(sprites[t.color], cx - w / 2, cy - h / 2 + (cell * s - h) / 2, w, h);
+    if (t.color === RAINBOW) {
+      ctx.save();
+      ctx.translate(cx, cy + dy);
+      ctx.rotate(now / 1400);
+      ctx.drawImage(sprites[t.color], -w / 2, -h / 2, w, h);
+      ctx.restore();
+    } else {
+      ctx.drawImage(sprites[t.color], cx - w / 2, cy - h / 2 + dy, w, h);
+    }
     ctx.globalAlpha = 1;
+  }
+
+  // 十字炸弹的横竖光束、彩虹球射向同色方块的闪电
+  function drawEffects() {
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (const b of beams) {
+      if (b.life < 0) continue;
+      const k = b.life / b.max, a = 1 - k;
+      const x = pad + (b.c + 0.5) * cell, y = pad + (b.r + 0.5) * cell;
+      const th = cell * (0.9 - 0.6 * k);
+      ctx.globalAlpha = a * 0.75;
+      ctx.fillStyle = '#FFC93C';
+      ctx.fillRect(pad, y - th / 2, N * cell, th);
+      ctx.fillRect(x - th / 2, pad, th, N * cell);
+      ctx.globalAlpha = a;
+      ctx.fillStyle = '#FFFFFF';
+      ctx.fillRect(pad, y - th * 0.18, N * cell, th * 0.36);
+      ctx.fillRect(x - th * 0.18, pad, th * 0.36, N * cell);
+    }
+    ctx.lineCap = 'round';
+    for (const z of zaps) {
+      if (z.life < 0) continue;
+      const k = z.life / z.max, a = 1 - k;
+      const x0 = pad + (z.c + 0.5) * cell, y0 = pad + (z.r + 0.5) * cell;
+      ctx.globalAlpha = a;
+      ctx.strokeStyle = '#FFFFFF';
+      ctx.lineWidth = cell * 0.07 * (1 - k * 0.6);
+      ctx.beginPath();
+      for (const [ty, tx] of z.targets) {
+        ctx.moveTo(x0, y0);
+        ctx.lineTo(pad + (tx + 0.5) * cell, pad + (ty + 0.5) * cell);
+      }
+      ctx.stroke();
+      ctx.globalAlpha = a * 0.8;
+      ctx.lineWidth = cell * 0.12;
+      ctx.strokeStyle = '#B9A2FF';
+      ctx.beginPath();
+      ctx.arc(x0, y0, cell * (0.5 + k * 3), 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.restore();
   }
 
   function draw(now) {
@@ -732,6 +1004,7 @@
       if (t) drawTile(t, now);
     }
     ctx.restore();
+    drawEffects();
 
     if (kbd && document.activeElement === canvas) {
       ctx.save();
@@ -759,13 +1032,14 @@
     ctx.textBaseline = 'middle';
     ctx.lineJoin = 'round';
     for (const p of popups) {
+      if (p.life < 0) continue;
       const k = p.life / p.max;
       const rise = ease.outCubic(Math.min(1, k * 1.4)) * 0.9;
       const sc = k < 0.15 ? 0.6 + (k / 0.15) * 0.5 : 1.1 - Math.min(0.1, k - 0.15);
       const size = cell * 0.52 * p.big * sc;
       const x = pad + p.x * cell, y = pad + (p.y - rise) * cell;
       ctx.globalAlpha = k < 0.6 ? 1 : 1 - (k - 0.6) / 0.4;
-      ctx.font = `${size}px "Lilita One", "Arial Rounded MT Bold", sans-serif`;
+      ctx.font = `${size}px "Lilita One", "ZCOOL KuaiLe", "Microsoft YaHei", sans-serif`;
       ctx.lineWidth = size * 0.22;
       ctx.strokeStyle = theme.edge;
       ctx.strokeText(p.text, x, y);
@@ -854,16 +1128,37 @@
     busy = false;
   }
 
-  async function clearCells(cells) {
-    const tiles = cells.map(([r, c]) => grid[r][c]).filter(Boolean);
-    tiles.forEach(burst);
-    await tween(230, p => {
-      for (const t of tiles) {
-        if (p < 0.3) { t.scale = 1 + 0.22 * (p / 0.3); t.alpha = 1; }
-        else { const q = (p - 0.3) / 0.7; t.scale = 1.22 * (1 - q); t.alpha = 1 - q * q; }
+  // delays：每格开始消失前等多久（秒），特殊方块炸开时由近到远依次消失
+  async function clearCells(cells, delays) {
+    const items = cells
+      .map(([r, c]) => ({ t: grid[r][c], d: (delays && delays.get(r * N + c)) || 0, popped: false }))
+      .filter(o => o.t);
+    const total = 0.23 + items.reduce((m, o) => Math.max(m, o.d), 0);
+    await tween(total * 1000, p => {
+      const el = p * total;
+      for (const o of items) {
+        const q = Math.min(1, Math.max(0, (el - o.d) / 0.23));
+        if (q > 0 && !o.popped) { o.popped = true; burst(o.t); }
+        if (q < 0.3) { o.t.scale = 1 + 0.22 * (q / 0.3); o.t.alpha = 1; }
+        else { const u = (q - 0.3) / 0.7; o.t.scale = 1.22 * (1 - u); o.t.alpha = 1 - u * u; }
       }
     }, ease.linear);
     for (const [r, c] of cells) grid[r][c] = null;
+  }
+
+  // 在刚被消掉的某个空位上冒出一个特殊方块
+  async function spawnSpecialAt(cells) {
+    const [r, c] = cells[(Math.random() * cells.length) | 0];
+    const t = makeTile(randSpecial(), r, c);
+    t.scale = 0;
+    grid[r][c] = t;
+    sfx.sparkle();
+    burst(t);
+    popups.push({
+      x: Math.min(N - 1, Math.max(1, c + 0.5)), y: Math.max(0.8, r + 0.5),
+      text: SPECIAL_NAMES[t.color] + '!', life: 0, max: 1.0, big: 0.7,
+    });
+    await tween(280, p => { t.scale = p; }, ease.outBack);
   }
 
   // 消除后每列往下压实，空出来的格子从棋盘上方补新糖果
@@ -879,7 +1174,7 @@
       }
       const k = w + 1;
       for (let r = w; r >= 0; r--) {
-        const t = makeTile(randColor(), r, c);
+        const t = makeTile(Math.random() < SPECIAL_DROP ? randSpecial() : randColor(), r, c);
         t.y = r - k;
         t.ty = r;
         grid[r][c] = t;
@@ -893,23 +1188,37 @@
     let chain = 0;
     while (m.marked.size) {
       chain++;
-      const cells = [...m.marked].map(i => [Math.floor(i / N), i % N]);
+      const { clear, delay, effects } = expandClear(m, colorsOf());
+      const cells = [...clear].map(i => [Math.floor(i / N), i % N]);
       let pts = cells.length * 10;
-      for (const run of m.runs) pts += run.length === 4 ? 20 : run.length >= 5 ? 50 : 0;
+      for (const run of m.runs) pts += run.cells.length === 4 ? 20 : run.cells.length >= 5 ? 50 : 0;
       pts *= chain;
       score += pts;
 
-      const cx = cells.reduce((s, [, c]) => s + c, 0) / cells.length + 0.5;
-      const cy = cells.reduce((s, [r]) => s + r, 0) / cells.length + 0.5;
+      // 得分飘字放在玩家连成的那一排上
+      const own = [...m.marked].map(i => [Math.floor(i / N), i % N]);
+      const cx = own.reduce((s, [, c]) => s + c, 0) / own.length + 0.5;
+      const cy = own.reduce((s, [r]) => s + r, 0) / own.length + 0.5;
       popups.push({
         x: Math.min(N - 1, Math.max(1, cx)), y: Math.max(0.8, cy),
         text: '+' + pts, life: 0, max: 0.95, big: 1 + Math.min(0.6, (chain - 1) * 0.15),
       });
+      for (const ef of effects) {
+        const life = -ef.d * SPEED;
+        if (ef.kind === CROSS) beams.push({ r: ef.r, c: ef.c, life, max: 0.5 });
+        else zaps.push({ r: ef.r, c: ef.c, targets: ef.targets, life, max: 0.5 });
+        popups.push({
+          x: Math.min(N - 1.5, Math.max(1.5, ef.c + 0.5)), y: Math.max(1, ef.r + 0.2),
+          text: ef.kind === CROSS ? '横竖全消' : '同色全消', life, max: 1.1, big: 0.75,
+        });
+      }
       if (chain >= 2) showCombo(chain);
       sfx.pop(chain);
+      if (effects.length) sfx.boom();
       updateStats();
 
-      await clearCells(cells);
+      await clearCells(cells, delay);
+      if (Math.random() < SPECIAL_ON_CLEAR) await spawnSpecialAt(cells);
       await drop(collapse());
       m = findMatches(colorsOf());
     }
