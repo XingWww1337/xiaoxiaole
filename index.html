@@ -288,8 +288,8 @@
   // 被别的特殊方块波及到的特殊方块也会接着触发。
   const RAINBOW = KINDS, CROSS = KINDS + 1;
   const isSpecial = k => k >= KINDS;
-  const SPECIAL_DROP = 0.05;      // 消除后从上方落下的每个新方块，有 5% 是特殊方块
-  const SPECIAL_ON_CLEAR = 0.05;  // 每次消除，有 5% 在被消掉的位置上随机冒出一个特殊方块
+  const SPECIAL_DROP = 0.03;      // 消除后从上方落下的每个新方块，有 3% 是特殊方块
+  const SPECIAL_ON_CLEAR = 0.03;  // 每次消除，有 3% 在被消掉的位置上随机冒出一个特殊方块
   const randSpecial = () => (Math.random() < 0.5 ? RAINBOW : CROSS);
   const SPECIAL_NAMES = { [RAINBOW]: '彩虹球', [CROSS]: '十字炸弹' };
 
