@@ -1,4 +1,5 @@
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>六色消消乐</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -105,9 +106,11 @@
     aspect-ratio: 1 / 1;
     border-radius: 4%;
     box-shadow: 0 8px 0 var(--tray-edge), 0 20px 36px var(--shadow);
-    touch-action: none;
+    touch-action: none;               /* 棋盘上的手指滑动只给游戏用，不滚页面、不缩放 */
     cursor: pointer;
     user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;      /* iOS 长按不弹出“存储图像”菜单 */
     -webkit-tap-highlight-color: transparent;
   }
   #board:focus { outline: none; }
@@ -165,8 +168,11 @@
     cursor: pointer;
     box-shadow: 0 3px 0 var(--line);
     transition: transform 0.12s, box-shadow 0.12s, background-color 0.2s;
+    touch-action: manipulation;       /* 连点按钮不会触发双击放大 */
+    -webkit-tap-highlight-color: transparent;
   }
-  .btn:hover { background: var(--hover); }
+  @media (hover: hover) { .btn:hover { background: var(--hover); } }
+  .top, .stats, .controls, .rules { user-select: none; -webkit-user-select: none; }
   .btn:active { transform: translateY(2px); box-shadow: 0 1px 0 var(--line); }
   .btn:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
   .btn.armed { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
@@ -186,7 +192,9 @@
   .rules b { font-family: var(--font-display); font-weight: 400; font-size: 15px; color: var(--ink); margin-right: 4px; }
   .how { margin: 0; max-width: 46ch; font-size: 12px; line-height: 1.6; color: var(--muted); text-align: center; }
 
+  @media (pointer: coarse) { .kb { display: none; } }
   @media (max-width: 420px) {
+    .app { gap: 10px; padding-block: 12px 18px; }
     .stat { padding: 7px 9px; }
     .stat .v { font-size: 21px; }
     .btn { font-size: 16px; }
@@ -231,7 +239,7 @@
     <li><b>5 连</b>100 分</li>
     <li><b>连锁</b>第 n 波得分 ×n</li>
   </ul>
-  <p class="how">拖动糖果，或先后点两颗相邻的糖果来交换；横竖连成 3 颗同色即消除，上方糖果落下后再成行就是连锁。键盘：方向键移动，空格选择，H 提示。</p>
+  <p class="how">按住糖果朝相邻方向滑一下，或先后点两颗相邻的糖果来交换；横竖连成 3 颗同色即消除，上方糖果落下后再成行就是连锁。<span class="kb">键盘：方向键移动，空格选择，H 提示。</span></p>
 </main>
 
 <script>
@@ -312,14 +320,20 @@
     o.start(t0);
     o.stop(t0 + dur + 0.02);
   }
+  // 手机震动反馈（安卓支持，iPhone 的浏览器不支持会自动忽略）；跟音效开关一起关
+  function vibe(pattern) {
+    if (muted) return;
+    try { if (navigator.vibrate) navigator.vibrate(pattern); } catch { /* 不支持就算了 */ }
+  }
   const STEPS = [0, 2, 4, 7, 9, 12, 14, 16, 19, 21, 24]; // 五声音阶，连锁越多音越高
   const sfx = {
     swap() { tone(420, 0, 0.09, 'sine', 0.05, 640); },
-    bad() { tone(190, 0, 0.16, 'square', 0.035, 120); },
+    bad() { tone(190, 0, 0.16, 'square', 0.035, 120); vibe([10, 40, 10]); },
     pop(chain) {
       const f = 523.25 * Math.pow(2, STEPS[Math.min(chain - 1, STEPS.length - 1)] / 12);
       tone(f, 0, 0.16, 'triangle', 0.16);
       tone(f * 1.5, 0.05, 0.18, 'triangle', 0.1);
+      vibe(chain >= 2 ? 25 : 12);
     },
     shuffle() { tone(300, 0, 0.28, 'sine', 0.05, 900); },
   };
@@ -671,6 +685,12 @@
     let cx = pad + (t.x + 0.5) * cell, cy = pad + (t.y + 0.5) * cell;
     let s = t.scale;
     if (selected && grid[selected.r][selected.c] === t) s *= 1.08 + 0.03 * Math.sin(now / 140);
+    if (drag && drag.tile === t) {
+      // 手指按住时糖果跟着往滑动方向挪一点，滑够距离就交换
+      cx += drag.ox * cell;
+      cy += drag.oy * cell;
+      s *= 1.06;
+    }
     if (hint) {
       const ta = grid[hint.a.r][hint.a.c], tb = grid[hint.b.r][hint.b.c];
       if (t === ta || t === tb) {
@@ -798,11 +818,13 @@
   }
 
   /* ---------- 回合流程 ---------- */
+  // 起点用当前位置（可能带着手指拖出的小偏移），终点对齐到对方的格子
   function animateSwap(ta, tb, ms = 170) {
     const ax = ta.x, ay = ta.y, bx = tb.x, by = tb.y;
+    const toAx = Math.round(bx), toAy = Math.round(by), toBx = Math.round(ax), toBy = Math.round(ay);
     return tween(ms, p => {
-      ta.x = ax + (bx - ax) * p; ta.y = ay + (by - ay) * p;
-      tb.x = bx + (ax - bx) * p; tb.y = by + (ay - by) * p;
+      ta.x = ax + (toAx - ax) * p; ta.y = ay + (toAy - ay) * p;
+      tb.x = bx + (toBx - bx) * p; tb.y = by + (toBy - by) * p;
     }, ease.inOutCubic);
   }
 
@@ -951,45 +973,77 @@
     selected = cell;
   }
 
+  // 棋盘四周的边框也算进最近的格子，手指按在边缘糖果的外沿也能拖
   function cellAt(e) {
     const rect = canvas.getBoundingClientRect();
     const x = (e.clientX - rect.left) / rect.width * W;
     const y = (e.clientY - rect.top) / rect.height * W;
-    const c = Math.floor((x - pad) / cell), r = Math.floor((y - pad) / cell);
-    return inside(r, c) ? { r, c } : null;
+    if (x < 0 || y < 0 || x > W || y > W) return null;
+    const c = Math.min(N - 1, Math.max(0, Math.floor((x - pad) / cell)));
+    const r = Math.min(N - 1, Math.max(0, Math.floor((y - pad) / cell)));
+    return { r, c };
+  }
+
+  // 一格在屏幕上的实际像素宽；滑动距离超过这个的 30%（至少 8px）就算一次滑动
+  function swipeInfo(e) {
+    const cssCell = canvas.getBoundingClientRect().width / W * cell;
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    const horiz = Math.abs(dx) >= Math.abs(dy);
+    const d = horiz ? dx : dy;
+    return { cssCell, horiz, d, dir: Math.sign(d), thr: Math.max(8, cssCell * 0.3) };
+  }
+
+  function endDrag() {
+    if (!drag) return;
+    try { canvas.releasePointerCapture(drag.id); } catch { /* 已释放 */ }
+    drag = null;
+  }
+
+  function commitSwipe(horiz, dir) {
+    const from = drag.cell;
+    const to = horiz ? { r: from.r, c: from.c + dir } : { r: from.r + dir, c: from.c };
+    const t = drag.tile, ox = drag.ox, oy = drag.oy;
+    endDrag();
+    if (busy || !inside(to.r, to.c)) return;
+    if (t) { t.x += ox; t.y += oy; }   // 从手指松开的位置接着做交换动画，不跳回原位
+    selected = null;
+    trySwap(from, to);
   }
 
   canvas.addEventListener('pointerdown', e => {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     kbd = false;
     audio();
-    if (busy) return;
+    if (busy || drag) return;          // 第二根手指不管
     const cell = cellAt(e);
     if (!cell) return;
     e.preventDefault();
-    drag = { cell, x: e.clientX, y: e.clientY, id: e.pointerId };
+    drag = { cell, tile: grid[cell.r][cell.c], x: e.clientX, y: e.clientY, id: e.pointerId, ox: 0, oy: 0 };
     try { canvas.setPointerCapture(e.pointerId); } catch { /* 部分浏览器不支持 */ }
   });
   canvas.addEventListener('pointermove', e => {
     if (!drag || drag.id !== e.pointerId) return;
-    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
-    const rect = canvas.getBoundingClientRect();
-    const thr = rect.width / W * cell * 0.32;
-    if (Math.max(Math.abs(dx), Math.abs(dy)) < thr) return;
-    const d = Math.abs(dx) > Math.abs(dy) ? [0, Math.sign(dx)] : [Math.sign(dy), 0];
-    const from = drag.cell, to = { r: from.r + d[0], c: from.c + d[1] };
-    drag = null;
-    if (!inside(to.r, to.c)) return;
-    selected = null;
-    trySwap(from, to);
+    e.preventDefault();
+    const s = swipeInfo(e);
+    const from = drag.cell;
+    const canGo = s.dir !== 0 && (s.horiz ? inside(from.r, from.c + s.dir) : inside(from.r + s.dir, from.c));
+    const shift = canGo ? Math.min(Math.abs(s.d), s.thr) / s.cssCell * 0.6 * s.dir : 0;
+    drag.ox = s.horiz ? shift : 0;
+    drag.oy = s.horiz ? 0 : shift;
+    if (Math.abs(s.d) >= s.thr) commitSwipe(s.horiz, s.dir);
   });
   canvas.addEventListener('pointerup', e => {
+    audio();                           // iOS 要在抬手时才允许开声音
     if (!drag || drag.id !== e.pointerId) return;
+    const s = swipeInfo(e);
+    if (Math.abs(s.d) >= s.thr) { commitSwipe(s.horiz, s.dir); return; }   // 很快的一甩，没来得及触发 move
     const cell = drag.cell;
-    drag = null;
+    endDrag();
     activate(cell);
   });
-  canvas.addEventListener('pointercancel', () => { drag = null; });
+  canvas.addEventListener('pointercancel', e => { if (drag && drag.id === e.pointerId) drag = null; });
+  canvas.addEventListener('lostpointercapture', e => { if (drag && drag.id === e.pointerId) drag = null; });
+  canvas.addEventListener('contextmenu', e => e.preventDefault());   // 安卓长按不弹菜单
 
   canvas.addEventListener('keydown', e => {
     const mv = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] }[e.key];
